@@ -26,3 +26,7 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+# TCP transfer test files
+file_transfer/received_files/
+.env
+test_tcp_file.txt

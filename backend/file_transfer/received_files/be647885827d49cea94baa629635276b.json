@@ -1,0 +1,7 @@
+{
+    "encryption": "AES-256-GCM",
+    "key_encryption": "RSA-OAEP-SHA256",
+    "nonce": "wt8b0ewLMz/uuL1I",
+    "wrapped_key": "CoRcCsc/tWV9tmTs807CH3d+SihoH6ci8Mq4OZN4z9vZIDqpf72BQaoRati/Q6fZjoXIfVq1IaSGOU8+cCvWVFs4H09fe98pq5QYguQaw3XQgWlbjudjS+pdPO6hMJ3qkd7ELz+pqgBee6MdStz2wcmDp9LhPhexY5XWITVmssJ6kFBgu6iHbTuC3wlFYv1fgnGMrE1cgAAZsZbswbODpajFttg6lOfyXLfO1nMAY7cEHzd3+17ZhpN9cerSYYu0M8tRFA+F7QhkYhFQgoEwvgXiVQI4dGgR1Lhvvr/JJ8gSTknQ2MQpxafTil9QBVDQATVUyD4b4lU0EDTQ1kZRNA==",
+    "file_size": 61
+}

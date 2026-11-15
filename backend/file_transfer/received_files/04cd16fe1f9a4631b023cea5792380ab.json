@@ -1,0 +1,8 @@
+{
+    "encryption": "AES-256-GCM",
+    "key_encryption": "RSA-OAEP-SHA256",
+    "nonce": "DokwydB/5TyGNcox",
+    "wrapped_key": "eZd/y2kL4reIzr7/mAZAU19lpWhcBCqCd1Y757AxBThkcqtVr2t7VCYP8ra02r/9FZAAbqNlrFkjbL65NjP4Vld9W32xT1/Euse2+JoSWaDdo/lIF1Wcyz3Dvv3Gi1ItcgXXtuObT+xUmETHxOossYZJe+zaTe/EBBwQymAbEmt2C4ywXJYWBi2equdR0sZTppXAsI4WCY0z6PijclGwVBdZaqUhF0JILfZbYtO5nzhZl9NeIvPP2ELezoau0vSexv/PZ2jdXZ+/IXLwrmxU/wBunkYJ0McG/vC+9SH0MvpnrinisI3w2VkrmNG/NU0aak9Xrqasc9zhNDVw5BPMjg==",
+    "auth_token": "8b478aaf566676457deb9f36c12be3f0bc8adee090946863095e20954b9be353",
+    "file_size": 61
+}
