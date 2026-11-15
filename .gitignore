@@ -26,3 +26,11 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+# TCP transfer test files
+file_transfer/received_files/
+.env
+test_tcp_file.txt
+# Django uploaded files and test data
+backend/media/
+backend/test_uploads/
+backend/file_transfer/received_files/

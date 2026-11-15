@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   Users,
   FolderKanban,
+  Folder,
   LogOut,
   Plus,
   Wallet,
@@ -23,7 +24,7 @@ import {
 import { BrowserProvider } from "ethers";
 import api from "./api";
 import Chat from "./Chat";
-
+import Artifacts from "./artifacts/Artifacts";
 // ==========================================
 // AUTHENTICATION: LOGIN AND REGISTRATION
 // ==========================================
@@ -204,6 +205,7 @@ function Shell({ children, active }) {
     ["Overview", "/", LayoutDashboard],
     ["Teams", "/teams", Users],
     ["Projects", "/projects", FolderKanban],
+    ["Artifacts", "/artifacts", Folder],
     ["Chat", "/chat", MessageSquare]
   ];
 
@@ -1211,7 +1213,18 @@ export default function App() {
             </Guard>
           }
         />
-
+        <Route
+          path="/artifacts"
+          element={
+            <Guard>
+              <div className="min-h-screen bg-slate-50">
+                <Shell active="/artifacts">
+                  <Artifacts />
+                </Shell>
+              </div>
+            </Guard>
+          }
+        />
         <Route
           path="/chat"
           element={
