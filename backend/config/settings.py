@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     'teams',
     'projects',
     'artifacts',
+    'communication',
 ]
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
@@ -81,6 +82,15 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]
+CORS_EXPOSE_HEADERS = [
+    "X-Artifact-Encrypted",
+    "X-Artifact-SHA256",
+    "X-Artifact-Original-Filename",
+    "X-Artifact-Algorithm",
+    "X-Artifact-Nonce",
+    "X-Artifact-Wrapped-Key",
+    "X-Artifact-Key-Algorithm",
+]
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",

@@ -1,5 +1,5 @@
 import os
-
+from accounts.models import Profile
 from django.contrib.auth.models import User
 from django.db import models, transaction
 from django.http import FileResponse
@@ -11,7 +11,20 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.exceptions import PermissionDenied
+import base64
 
+from django.core.files.base import ContentFile
+
+from .models import ArtifactVersionKey
+
+from .services.encryption import (
+    generate_aes_key,
+    encrypt_file_data,
+)
+from .services.key_exchange import (
+    load_recipient_public_key,
+    wrap_aes_key,
+)
 from django.db.models import Q
 
 from projects.models import Project
@@ -49,7 +62,7 @@ class ArtifactListUploadView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
-    
+
     def get(self, request):
         """List only artifacts the user is allowed to view."""
 
@@ -72,8 +85,9 @@ class ArtifactListUploadView(APIView):
         return Response(serializer.data)
 
 
+
     def post(self, request):
-        """Upload a new artifact and create its first version."""
+        """Upload and encrypt a new artifact."""
 
         project_id = request.data.get("project")
         uploaded_file = request.FILES.get("file")
@@ -90,10 +104,7 @@ class ArtifactListUploadView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Basic upload-size limit: 100 MB.
-        max_size = 100 * 1024 * 1024
-
-        if uploaded_file.size > max_size:
+        if uploaded_file.size > 100 * 1024 * 1024:
             return Response(
                 {"error": "File size cannot exceed 100 MB."},
                 status=status.HTTP_400_BAD_REQUEST
@@ -101,7 +112,6 @@ class ArtifactListUploadView(APIView):
 
         project = get_object_or_404(Project, pk=project_id)
 
-        # Verify that the uploader belongs to the project's team.
         is_member = TeamMembership.objects.filter(
             team=project.team,
             user=request.user
@@ -113,10 +123,50 @@ class ArtifactListUploadView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Calculate the hash from the actual uploaded file.
+        # Retrieve the uploader's registered RSA public key.
+        profile = Profile.objects.filter(user=request.user).first()
+
+        if not profile or not profile.public_key:
+            return Response(
+                {
+                    "error": (
+                        "Register your RSA public key before "
+                        "uploading encrypted artifacts."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Calculate SHA-256 from the original plaintext.
         file_hash = calculate_sha256(uploaded_file)
 
-        # Store the artifact and its first version.
+        # Read original file bytes.
+        uploaded_file.seek(0)
+        file_data = uploaded_file.read()
+
+        # Generate AES key and encrypt the file.
+        aes_key = generate_aes_key()
+        encrypted_file = encrypt_file_data(file_data, aes_key)
+
+        ciphertext = base64.b64decode(
+            encrypted_file["ciphertext"]
+        )
+
+        # Wrap AES key for the uploader.
+        recipient_public_key = load_recipient_public_key(
+            profile.public_key
+        )
+
+        wrapped_key = wrap_aes_key(
+            aes_key,
+            recipient_public_key
+        )
+
+        original_filename = os.path.basename(
+            uploaded_file.name.replace("\\", "/")
+        )[:255]
+
+        # Store encrypted artifact and key metadata.
         with transaction.atomic():
             artifact = Artifact.objects.create(
                 project=project,
@@ -126,27 +176,42 @@ class ArtifactListUploadView(APIView):
                 current_version=1
             )
 
-            original_filename = os.path.basename(
-                uploaded_file.name.replace("\\", "/")
-            )[:255]
-
             version = ArtifactVersion.objects.create(
                 artifact=artifact,
                 version_number=1,
-                file=uploaded_file,
+                file=ContentFile(
+                    ciphertext,
+                    name=original_filename + ".enc"
+                ),
                 original_filename=original_filename,
                 sha256_hash=file_hash,
                 file_size=uploaded_file.size,
-                uploaded_by=request.user
+                uploaded_by=request.user,
+                is_encrypted=True,
+                encryption_algorithm="AES-256-GCM",
+                encryption_nonce=encrypted_file["nonce"],
+                encrypted_file_size=len(ciphertext)
+            )
+
+            ArtifactVersionKey.objects.create(
+                version=version,
+                recipient=request.user,
+                wrapped_key=wrapped_key,
+                key_encryption_algorithm="RSA-OAEP-SHA256",
+                recipient_key_id=profile.key_fingerprint
             )
 
         serializer = ArtifactSerializer(artifact)
 
         return Response(
             {
-                "message": "Artifact uploaded successfully.",
+                "message": "Encrypted artifact uploaded successfully.",
                 "artifact": serializer.data,
-                "sha256_hash": version.sha256_hash,
+                "sha256_hash": file_hash,
+                "encryption": "AES-256-GCM",
+                "key_encryption": "RSA-OAEP-SHA256",
+                "wrapped_key": wrapped_key,
+                "encrypted_file_size": len(ciphertext)
             },
             status=status.HTTP_201_CREATED
         )
@@ -220,33 +285,18 @@ class ArtifactVerifyView(APIView):
         )
 
 
+
 class ArtifactDownloadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, artifact_id):
-        """Download an artifact only when the user has download permission."""
+        """Return encrypted artifact bytes and the requesting user's wrapped key."""
 
         artifact = get_accessible_artifact(
             artifact_id,
             request.user,
             permission="download"
         )
-
-        # The uploader always has access.
-        is_owner = artifact.uploaded_by_id == request.user.id
-
-        # Other users need an explicit download permission.
-        has_download_permission = ArtifactAccess.objects.filter(
-            artifact=artifact,
-            user=request.user,
-            permission="download"
-        ).exists()
-
-        if not is_owner and not has_download_permission:
-            return Response(
-                {"error": "You do not have permission to download this artifact."},
-                status=status.HTTP_403_FORBIDDEN
-            )
 
         version_number = request.query_params.get("version")
 
@@ -269,6 +319,23 @@ class ArtifactDownloadView(APIView):
             version_number=version_number
         )
 
+        # Find the AES key wrapped specifically for this recipient.
+        key_record = ArtifactVersionKey.objects.filter(
+            version=version,
+            recipient=request.user
+        ).first()
+
+        if version.is_encrypted and not key_record:
+            return Response(
+                {
+                    "error": (
+                        "No encryption key is available for your account. "
+                        "Ask the artifact owner to share access securely."
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         try:
             file_handle = version.file.open("rb")
         except (OSError, ValueError):
@@ -277,11 +344,38 @@ class ArtifactDownloadView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        return FileResponse(
+        filename = (
+            version.original_filename
+            if not version.is_encrypted
+            else version.original_filename + ".enc"
+        )
+
+        response = FileResponse(
             file_handle,
             as_attachment=True,
-            filename=version.original_filename
+            filename=filename
         )
+
+        response["X-Artifact-Encrypted"] = str(
+            version.is_encrypted
+        ).lower()
+
+        response["X-Artifact-SHA256"] = version.sha256_hash
+        response["X-Artifact-Original-Filename"] = base64.b64encode(
+            version.original_filename.encode("utf-8")
+        ).decode("ascii")
+
+        if version.is_encrypted:
+            response["X-Artifact-Algorithm"] = (
+                version.encryption_algorithm
+            )
+            response["X-Artifact-Nonce"] = version.encryption_nonce
+            response["X-Artifact-Wrapped-Key"] = key_record.wrapped_key
+            response["X-Artifact-Key-Algorithm"] = (
+                key_record.key_encryption_algorithm
+            )
+
+        return response
 
 
 class ArtifactVersionListCreateView(APIView):
@@ -317,8 +411,9 @@ class ArtifactVersionListCreateView(APIView):
             "versions": serializer.data
         })
 
+
     def post(self, request, artifact_id):
-        """Upload a new version without replacing older versions."""
+        """Upload a new encrypted artifact version."""
 
         uploaded_file = request.FILES.get("file")
 
@@ -331,6 +426,14 @@ class ArtifactVersionListCreateView(APIView):
         if uploaded_file.size > 100 * 1024 * 1024:
             return Response(
                 {"error": "File size cannot exceed 100 MB."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        profile = Profile.objects.filter(user=request.user).first()
+
+        if not profile or not profile.public_key:
+            return Response(
+                {"error": "Register your RSA public key first."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -351,20 +454,54 @@ class ArtifactVersionListCreateView(APIView):
                 )["maximum"] or 0
             ) + 1
 
+            file_hash = calculate_sha256(uploaded_file)
+
+            uploaded_file.seek(0)
+            file_data = uploaded_file.read()
+
+            aes_key = generate_aes_key()
+            encrypted_file = encrypt_file_data(file_data, aes_key)
+
+            ciphertext = base64.b64decode(
+                encrypted_file["ciphertext"]
+            )
+
+            recipient_public_key = load_recipient_public_key(
+                profile.public_key
+            )
+
+            wrapped_key = wrap_aes_key(
+                aes_key,
+                recipient_public_key
+            )
+
             original_filename = os.path.basename(
                 uploaded_file.name.replace("\\", "/")
             )[:255]
 
-            file_hash = calculate_sha256(uploaded_file)
-
             version = ArtifactVersion.objects.create(
                 artifact=artifact,
                 version_number=next_version,
-                file=uploaded_file,
+                file=ContentFile(
+                    ciphertext,
+                    name=original_filename + ".enc"
+                ),
                 original_filename=original_filename,
                 sha256_hash=file_hash,
                 file_size=uploaded_file.size,
-                uploaded_by=request.user
+                uploaded_by=request.user,
+                is_encrypted=True,
+                encryption_algorithm="AES-256-GCM",
+                encryption_nonce=encrypted_file["nonce"],
+                encrypted_file_size=len(ciphertext)
+            )
+
+            ArtifactVersionKey.objects.create(
+                version=version,
+                recipient=request.user,
+                wrapped_key=wrapped_key,
+                key_encryption_algorithm="RSA-OAEP-SHA256",
+                recipient_key_id=profile.key_fingerprint
             )
 
             artifact.current_version = next_version
@@ -376,11 +513,15 @@ class ArtifactVersionListCreateView(APIView):
         serializer = ArtifactVersionSerializer(version)
 
         return Response({
-            "message": "New artifact version uploaded successfully.",
+            "message": "Encrypted artifact version uploaded successfully.",
             "artifact_id": artifact.id,
             "current_version": artifact.current_version,
-            "version": serializer.data
+            "version": serializer.data,
+            "wrapped_key": wrapped_key,
+            "sha256_hash": file_hash
         }, status=status.HTTP_201_CREATED)
+
+
 
 class ArtifactShareView(APIView):
     permission_classes = [IsAuthenticated]
@@ -393,12 +534,21 @@ class ArtifactShareView(APIView):
         )
 
     def post(self, request, artifact_id):
-        """Share an artifact with another member of its project team."""
+        """
+        Share an artifact using recipient-specific RSA-wrapped AES keys.
 
-        artifact = self.get_owned_artifact(artifact_id, request.user)
+        The browser must unwrap and rewrap each AES key locally.
+        The backend receives only the recipient's wrapped keys.
+        """
+
+        artifact = self.get_owned_artifact(
+            artifact_id,
+            request.user
+        )
 
         username = request.data.get("username", "").strip()
         permission = request.data.get("permission", "view")
+        wrapped_keys = request.data.get("wrapped_keys")
 
         if not username:
             return Response(
@@ -409,6 +559,17 @@ class ArtifactShareView(APIView):
         if permission not in ("view", "download"):
             return Response(
                 {"error": "Permission must be 'view' or 'download'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not isinstance(wrapped_keys, list) or not wrapped_keys:
+            return Response(
+                {
+                    "error": (
+                        "Recipient-specific wrapped keys are required "
+                        "for every encrypted artifact version."
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -426,7 +587,6 @@ class ArtifactShareView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Sharing is restricted to members of the same project team.
         is_team_member = TeamMembership.objects.filter(
             team=artifact.project.team,
             user=user
@@ -434,28 +594,125 @@ class ArtifactShareView(APIView):
 
         if not is_team_member:
             return Response(
-                {"error": "The user is not a member of this project's team."},
+                {
+                    "error": (
+                        "The user is not a member of this project's team."
+                    )
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        grant, created = ArtifactAccess.objects.update_or_create(
-            artifact=artifact,
-            user=user,
-            defaults={
-                "permission": permission,
-                "granted_by": request.user
-            }
+        recipient_profile = Profile.objects.filter(
+            user=user
+        ).first()
+
+        if not recipient_profile or not recipient_profile.public_key:
+            return Response(
+                {
+                    "error": (
+                        "The recipient must register an RSA public key "
+                        "before receiving encrypted artifacts."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        encrypted_versions = list(
+            ArtifactVersion.objects.filter(
+                artifact=artifact,
+                is_encrypted=True
+            ).values_list("id", flat=True)
         )
+
+        if not encrypted_versions:
+            return Response(
+                {"error": "This artifact has no encrypted versions to share."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate the supplied version IDs and wrapped keys.
+        supplied_keys = {}
+
+        for item in wrapped_keys:
+            if not isinstance(item, dict):
+                return Response(
+                    {"error": "Each wrapped key must be an object."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            version_id = item.get("version_id")
+            wrapped_key = item.get("wrapped_key")
+
+            try:
+                version_id = int(version_id)
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "Each key requires a valid version_id."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if not isinstance(wrapped_key, str) or not wrapped_key.strip():
+                return Response(
+                    {"error": "Each version requires a wrapped AES key."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if version_id in supplied_keys:
+                return Response(
+                    {"error": "Duplicate version IDs were supplied."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            supplied_keys[version_id] = wrapped_key.strip()
+
+        if set(supplied_keys.keys()) != set(encrypted_versions):
+            return Response(
+                {
+                    "error": (
+                        "Wrapped keys must be supplied for every encrypted "
+                        "version of this artifact, and no other versions."
+                    ),
+                    "required_version_ids": encrypted_versions
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Grant access and store recipient-specific wrapped keys atomically.
+        with transaction.atomic():
+            grant, created = ArtifactAccess.objects.update_or_create(
+                artifact=artifact,
+                user=user,
+                defaults={
+                    "permission": permission,
+                    "granted_by": request.user
+                }
+            )
+
+            for version_id, wrapped_key in supplied_keys.items():
+                ArtifactVersionKey.objects.update_or_create(
+                    version_id=version_id,
+                    recipient=user,
+                    defaults={
+                        "wrapped_key": wrapped_key,
+                        "key_encryption_algorithm": "RSA-OAEP-SHA256",
+                        "recipient_key_id": (
+                            recipient_profile.key_fingerprint
+                        )
+                    }
+                )
 
         serializer = ArtifactAccessSerializer(grant)
 
         return Response(
             {
                 "message": (
-                    "Artifact access granted."
-                    if created else "Artifact access updated."
+                    "Encrypted artifact access granted."
+                    if created
+                    else "Encrypted artifact access updated."
                 ),
-                "access": serializer.data
+                "access": serializer.data,
+                "recipient": user.username,
+                "wrapped_versions": len(supplied_keys)
             },
             status=(
                 status.HTTP_201_CREATED
@@ -464,22 +721,267 @@ class ArtifactShareView(APIView):
         )
 
     def delete(self, request, artifact_id, user_id):
-        """Revoke a previously granted permission."""
+        """Revoke access and delete the recipient's wrapped keys."""
 
-        artifact = self.get_owned_artifact(artifact_id, request.user)
+        artifact = self.get_owned_artifact(
+            artifact_id,
+            request.user
+        )
 
-        deleted, _ = ArtifactAccess.objects.filter(
-            artifact=artifact,
-            user_id=user_id
-        ).delete()
+        with transaction.atomic():
+            grant = ArtifactAccess.objects.select_for_update().filter(
+                artifact=artifact,
+                user_id=user_id
+            ).first()
 
-        if not deleted:
-            return Response(
-                {"error": "No access grant found for this user."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+            if not grant:
+                return Response(
+                    {"error": "No access grant found for this user."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            grant.delete()
+
+            ArtifactVersionKey.objects.filter(
+                version__artifact=artifact,
+                recipient_id=user_id
+            ).delete()
 
         return Response(
-            {"message": "Artifact access revoked."},
+            {
+                "message": (
+                    "Artifact access revoked and recipient key records deleted."
+                )
+            },
             status=status.HTTP_200_OK
         )
+
+class ArtifactSharingKeysView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, artifact_id):
+        """
+        Return the owner's RSA-wrapped AES keys for every encrypted
+        version. The browser unwraps and rewraps them for the recipient.
+        """
+
+        artifact = get_object_or_404(
+            Artifact,
+            pk=artifact_id,
+            uploaded_by=request.user
+        )
+
+        versions = ArtifactVersion.objects.filter(
+            artifact=artifact,
+            is_encrypted=True
+        ).order_by("version_number")
+
+        sharing_keys = []
+
+        for version in versions:
+            key_record = ArtifactVersionKey.objects.filter(
+                version=version,
+                recipient=request.user
+            ).first()
+
+            if not key_record:
+                return Response(
+                    {
+                        "error": (
+                            f"Your encryption key is missing for "
+                            f"version {version.version_number}."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            sharing_keys.append({
+                "version_id": version.id,
+                "version_number": version.version_number,
+                "wrapped_key": key_record.wrapped_key,
+                "key_encryption_algorithm": (
+                    key_record.key_encryption_algorithm
+                ),
+                "recipient_key_id": key_record.recipient_key_id
+            })
+
+        return Response({
+            "artifact_id": artifact.id,
+            "artifact_name": artifact.name,
+            "total_versions": len(sharing_keys),
+            "sharing_keys": sharing_keys
+        }, status=status.HTTP_200_OK)
+class ArtifactRecipientsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, artifact_id):
+        """Return existing artifact recipients and their public keys."""
+
+        artifact = get_object_or_404(
+            Artifact,
+            pk=artifact_id,
+            uploaded_by=request.user
+        )
+
+        grants = ArtifactAccess.objects.filter(
+            artifact=artifact
+        ).select_related("user")
+
+        recipients = []
+
+        for grant in grants:
+            profile = Profile.objects.filter(
+                user=grant.user
+            ).first()
+
+            if not profile or not profile.public_key:
+                return Response(
+                    {
+                        "error": (
+                            f"{grant.user.username} has not registered "
+                            "an RSA public key."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            recipients.append({
+                "user_id": grant.user.id,
+                "username": grant.user.username,
+                "permission": grant.permission,
+                "public_key": profile.public_key,
+                "key_fingerprint": profile.key_fingerprint
+            })
+
+        return Response({
+            "artifact_id": artifact.id,
+            "recipients": recipients
+        }, status=status.HTTP_200_OK)
+
+class ArtifactVersionRecipientKeysView(APIView):
+    permission_classes = [IsAuthenticated]
+
+
+    def post(self, request, artifact_id, version_id):
+        artifact = get_object_or_404(
+            Artifact,
+            pk=artifact_id,
+            uploaded_by=request.user
+        )
+
+        version = get_object_or_404(
+            ArtifactVersion,
+            pk=version_id,
+            artifact=artifact,
+            is_encrypted=True
+        )
+
+        wrapped_keys = request.data.get("wrapped_keys")
+
+        if not isinstance(wrapped_keys, list):
+            return Response(
+                {"error": "wrapped_keys must be a list."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Get all existing recipients.
+        grants = list(
+            ArtifactAccess.objects.filter(
+                artifact=artifact
+            ).select_related("user")
+        )
+
+        expected_ids = {grant.user_id for grant in grants}
+        supplied_keys = {}
+
+        for item in wrapped_keys:
+            if not isinstance(item, dict):
+                return Response(
+                    {"error": "Invalid wrapped key entry."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            try:
+                user_id = int(item.get("user_id"))
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "Invalid recipient user ID."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            wrapped_key = item.get("wrapped_key")
+
+            if not isinstance(wrapped_key, str) or not wrapped_key.strip():
+                return Response(
+                    {"error": "A wrapped AES key is required."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            if user_id in supplied_keys:
+                return Response(
+                    {"error": "Duplicate recipients supplied."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            supplied_keys[user_id] = wrapped_key.strip()
+
+        if set(supplied_keys) != expected_ids:
+            return Response(
+                {
+                    "error": "Keys must be supplied for every existing recipient.",
+                    "expected_recipient_ids": sorted(expected_ids)
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate every recipient before writing anything.
+        recipient_profiles = {}
+
+        for grant in grants:
+            profile = Profile.objects.filter(
+                user=grant.user
+            ).first()
+
+            if not profile or not profile.public_key:
+                return Response(
+                    {
+                        "error": (
+                            f"{grant.user.username} has no registered "
+                            "public key."
+                        )
+                    },
+                    status=status.HTTP_409_CONFLICT
+                )
+
+            recipient_profiles[grant.user_id] = profile
+
+        # Save all recipient keys atomically.
+        with transaction.atomic():
+            for grant in grants:
+                profile = recipient_profiles[grant.user_id]
+
+                ArtifactVersionKey.objects.update_or_create(
+                    version=version,
+                    recipient=grant.user,
+                    defaults={
+                        "wrapped_key": supplied_keys[grant.user_id],
+                        "key_encryption_algorithm": "RSA-OAEP-SHA256",
+                        "recipient_key_id": profile.key_fingerprint
+                    }
+                )
+
+        return Response(
+            {
+                "message": "Recipient keys stored successfully.",
+                "version_id": version.id,
+                "recipients_updated": len(grants)
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+        return Response({
+            "message": "Recipient keys stored successfully.",
+            "version_id": version.id,
+            "recipients_updated": len(grants)
+        }, status=status.HTTP_200_OK)

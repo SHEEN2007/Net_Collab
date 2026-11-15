@@ -48,3 +48,29 @@ class ProfileSerializer(serializers.ModelSerializer):
             instance.user.save(update_fields=["email"])
 
         return super().update(instance, validated_data)
+
+class PublicKeySerializer(serializers.Serializer):
+    public_key = serializers.CharField()
+
+    def validate_public_key(self, value):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        try:
+            key = serialization.load_pem_public_key(value.encode("utf-8"))
+        except (ValueError, TypeError):
+            raise serializers.ValidationError(
+                "Invalid PEM-encoded public key."
+            )
+
+        if not isinstance(key, rsa.RSAPublicKey):
+            raise serializers.ValidationError(
+                "Only RSA public keys are supported."
+            )
+
+        if key.key_size < 2048:
+            raise serializers.ValidationError(
+                "RSA key must be at least 2048 bits."
+            )
+
+        return value

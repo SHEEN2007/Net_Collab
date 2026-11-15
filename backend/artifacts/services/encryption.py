@@ -2,35 +2,23 @@
 import os
 import base64
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-
-AES_KEY_SIZE = 32       # 256 bits
-NONCE_SIZE = 12         # 96 bits
-
-
-def generate_aes_key():
-    """Generate a cryptographically secure 256-bit AES key."""
-    return AESGCM.generate_key(bit_length=256)
+from communication.crypto import (
+    generate_aes_key,
+    aes_gcm_encrypt,
+    aes_gcm_decrypt,
+    NONCE_BYTES,
+    AES_KEY_BYTES,
+)
 
 
 def encrypt_file_data(file_data: bytes, key: bytes) -> dict:
-    """
-    Encrypt file bytes using AES-256-GCM.
+    """Encrypt file bytes using shared AES-256-GCM implementation."""
 
-    Returns the nonce and ciphertext, both Base64 encoded.
-    """
-    if len(key) != AES_KEY_SIZE:
+    if len(key) != AES_KEY_BYTES:
         raise ValueError("AES-256 requires a 32-byte key.")
 
-    nonce = os.urandom(NONCE_SIZE)
-    aesgcm = AESGCM(key)
-
-    ciphertext = aesgcm.encrypt(
-        nonce,
-        file_data,
-        None
-    )
+    nonce = os.urandom(NONCE_BYTES)
+    ciphertext = aes_gcm_encrypt(key, nonce, file_data)
 
     return {
         "nonce": base64.b64encode(nonce).decode("utf-8"),
@@ -39,19 +27,12 @@ def encrypt_file_data(file_data: bytes, key: bytes) -> dict:
 
 
 def decrypt_file_data(encrypted_data: dict, key: bytes) -> bytes:
-    """
-    Decrypt AES-256-GCM ciphertext and authenticate its integrity.
-    """
-    if len(key) != AES_KEY_SIZE:
+    """Decrypt and authenticate AES-256-GCM encrypted file data."""
+
+    if len(key) != AES_KEY_BYTES:
         raise ValueError("AES-256 requires a 32-byte key.")
 
     nonce = base64.b64decode(encrypted_data["nonce"])
     ciphertext = base64.b64decode(encrypted_data["ciphertext"])
 
-    aesgcm = AESGCM(key)
-
-    return aesgcm.decrypt(
-        nonce,
-        ciphertext,
-        None
-    )
+    return aes_gcm_decrypt(key, nonce, ciphertext)

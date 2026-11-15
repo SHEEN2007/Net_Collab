@@ -7,6 +7,9 @@ from .views import (
     ArtifactDownloadView,
     ArtifactVersionListCreateView,
     ArtifactShareView,
+    ArtifactSharingKeysView,
+    ArtifactRecipientsView,
+    ArtifactVersionRecipientKeysView,
 )
 
 urlpatterns = [
@@ -37,5 +40,20 @@ urlpatterns = [
         "<int:artifact_id>/share/<int:user_id>/",
         ArtifactShareView.as_view(),
         name="artifact-revoke-share"
+    ),
+    path(
+        "<int:artifact_id>/sharing-keys/",
+        ArtifactSharingKeysView.as_view(),
+        name="artifact-sharing-keys"
+    ),
+    path(
+        "<int:artifact_id>/recipients/",
+        ArtifactRecipientsView.as_view(),
+        name="artifact-recipients"
+    ),
+    path(
+        "<int:artifact_id>/versions/<int:version_id>/recipient-keys/",
+        ArtifactVersionRecipientKeysView.as_view(),
+        name="artifact-version-recipient-keys"
     ),
 ]

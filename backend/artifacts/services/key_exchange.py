@@ -1,53 +1,37 @@
 
 import base64
 
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives import serialization
+from communication.crypto import (
+    generate_rsa_private_key,
+    load_public_key_pem,
+    rsa_wrap_key,
+    rsa_unwrap_key,
+)
 
 
 def generate_rsa_key_pair():
     """
-    Generate an RSA-2048 key pair for testing.
+    Generate an RSA key pair for local testing.
 
-    In production, the recipient owns and protects their
-    private key. Never share or expose it.
+    In production, users own and protect their private keys.
+    Never store private keys on the backend.
     """
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-    )
-
-    public_key = private_key.public_key()
-
-    return private_key, public_key
+    private_key = generate_rsa_private_key()
+    return private_key, private_key.public_key()
 
 
 def wrap_aes_key(aes_key: bytes, public_key) -> str:
-    """Encrypt an AES session key using RSA-OAEP-SHA256."""
-
-    encrypted_key = public_key.encrypt(
-        aes_key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None,
-        ),
-    )
-
-    return base64.b64encode(encrypted_key).decode("utf-8")
+    """Wrap an AES key using RSA-OAEP-SHA256."""
+    wrapped_key = rsa_wrap_key(public_key, aes_key)
+    return base64.b64encode(wrapped_key).decode("utf-8")
 
 
 def unwrap_aes_key(wrapped_key: str, private_key) -> bytes:
-    """Recover the AES session key using the recipient's private key."""
-
+    """Unwrap an AES key using the recipient's private key."""
     encrypted_key = base64.b64decode(wrapped_key)
+    return rsa_unwrap_key(private_key, encrypted_key)
 
-    return private_key.decrypt(
-        encrypted_key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None,
-        ),
-    )
+
+def load_recipient_public_key(public_key_pem: str):
+    """Load a recipient's registered PEM-encoded public key."""
+    return load_public_key_pem(public_key_pem)
