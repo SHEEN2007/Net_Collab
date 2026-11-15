@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     'accounts',
     'teams',
     'projects',
+    'communication',
 ]
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",

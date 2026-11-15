@@ -16,11 +16,13 @@ import {
   LogOut,
   Plus,
   Wallet,
-  CheckCircle2
+  CheckCircle2,
+  MessageSquare
 } from "lucide-react";
 
 import { BrowserProvider } from "ethers";
 import api from "./api";
+import Chat from "./Chat";
 
 // ==========================================
 // AUTHENTICATION: LOGIN AND REGISTRATION
@@ -201,7 +203,8 @@ function Shell({ children, active }) {
   const items = [
     ["Overview", "/", LayoutDashboard],
     ["Teams", "/teams", Users],
-    ["Projects", "/projects", FolderKanban]
+    ["Projects", "/projects", FolderKanban],
+    ["Chat", "/chat", MessageSquare]
   ];
 
   return (
@@ -1205,6 +1208,15 @@ export default function App() {
           element={
             <Guard>
               <Projects />
+            </Guard>
+          }
+        />
+
+        <Route
+          path="/chat"
+          element={
+            <Guard>
+              <Chat Shell={Shell} />
             </Guard>
           }
         />
